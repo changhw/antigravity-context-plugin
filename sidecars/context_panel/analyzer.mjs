@@ -23,7 +23,7 @@ export const DEFAULT_CONTEXT_LIMIT = 1_048_576;
 
 const BUILTIN_SYSTEM_TOOLS_ESTIMATE = 3850;
 const MCP_SERVER_BASE_SCHEMA_ESTIMATE = 680;
-const COMPACTION_RE = /<CONTEXT_SUMMARY>|\[CONTEXT_SUMMARY\]|<checkpoint_summary>/i;
+const COMPACTION_BLOCK_RE = /(?:^|\n)\s*<CONTEXT_SUMMARY>\s*\r?\n[\s\S]*?<\/CONTEXT_SUMMARY>/i;
 const MODEL_CHANGE_RE = /setting\s+`?Model Selection`?\s+from\s+.+?\s+to\s+([^\n.]+?)(?:\.|\n|$)/gi;
 
 // ---------------------------------------------------------------------------
@@ -723,21 +723,39 @@ export function analyzeConversation({
   const env = scanEnvironment({ appData, workspacePaths: resolvedWorkspaces });
   const artifactList = scanArtifacts(appData, targetConv);
 
-  // Detect compaction checkpoints (<CONTEXT_SUMMARY> or sharp planner token drop)
+  // Helper: find next PLANNER_RESPONSE total input tokens from index start
+  function nextPlannerTotalInput(fromIdx) {
+    for (let k = fromIdx; k < steps.length; k++) {
+      if (steps[k].type === 'PLANNER_RESPONSE') {
+        const tot = (Number(steps[k].input_tokens) || 0) + (Number(steps[k].cache_read_tokens) || 0);
+        if (tot > 0) return tot;
+      }
+    }
+    return 0;
+  }
+
+  // Detect compaction checkpoints (<CONTEXT_SUMMARY> block in non-tool step with token drop, or sharp planner drop)
   const checkpoints = [];
+  const checkpointSummaryIndices = new Set();
   let prevPlannerInput = 0;
   for (let i = 0; i < steps.length; i++) {
     const s = steps[i];
     const content = typeof s.content === 'string' ? s.content : '';
-    const hasSummaryTag = COMPACTION_RE.test(content);
-    if (hasSummaryTag) {
-      checkpoints.push({
-        idx: i,
-        stepIndex: Number.isFinite(s.step_index) ? s.step_index : i,
-        createdAt: s.created_at || '',
-        kind: 'summary',
-        tokens: estimateTokens(content),
-      });
+    const isCandidateStep = s.type !== 'GENERIC' && s.type !== 'PLANNER_RESPONSE' && (s.type === 'USER_INPUT' || s.source === 'SYSTEM');
+    const hasSummaryBlock = isCandidateStep && COMPACTION_BLOCK_RE.test(content);
+    if (hasSummaryBlock) {
+      const nextIn = nextPlannerTotalInput(i + 1);
+      const shrunkOrInitial = prevPlannerInput === 0 || nextIn === 0 || nextIn < prevPlannerInput * 0.85;
+      if (shrunkOrInitial) {
+        checkpointSummaryIndices.add(i);
+        checkpoints.push({
+          idx: i,
+          stepIndex: Number.isFinite(s.step_index) ? s.step_index : i,
+          createdAt: s.created_at || '',
+          kind: 'summary',
+          tokens: estimateTokens(content),
+        });
+      }
     } else if (s.type === 'PLANNER_RESPONSE') {
       const totalIn = (Number(s.input_tokens) || 0) + (Number(s.cache_read_tokens) || 0);
       if (prevPlannerInput > 24_000 && totalIn > 0 && totalIn < prevPlannerInput * 0.62) {
@@ -824,7 +842,7 @@ export function analyzeConversation({
       };
     } else if (s.type === 'USER_INPUT' || s.source === 'USER_EXPLICIT') {
       const content = typeof s.content === 'string' ? s.content : '';
-      const isCheckpointSummary = COMPACTION_RE.test(content);
+      const isCheckpointSummary = checkpointSummaryIndices.has(i);
       stepMeta[i] = {
         kind: isCheckpointSummary ? 'checkpoint_summary' : 'user',
         raw: Math.max(1, estimateTokens(content)),

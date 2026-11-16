@@ -1,7 +1,7 @@
 {
   "name": "antigravity-context-plugin",
   "displayName": "Context",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Interactive /context usage panel and slash command for Antigravity Desktop: proportional token grid, category breakdown, prompt cache telemetry, compaction checkpoints, and tracked files.",
   "logo": "assets/logo.svg",
   "author": {

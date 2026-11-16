@@ -284,3 +284,60 @@ test('estimateTokens scales reasonably for empty, prose, and JSON inputs', () =>
   assert.ok(estimateTokens('Hello world from Antigravity context plugin.') > 5);
   assert.ok(estimateTokens(JSON.stringify({ a: [1, 2, 3], b: { c: 'test' } })) > 5);
 });
+
+test('GENERIC tool outputs mentioning <CONTEXT_SUMMARY> do not trigger false compaction checkpoints', () => {
+  const env = makeTempEnv();
+  try {
+    const conv = '99999999-8888-7777-6666-555555555555';
+    const logsDir = join(env.appData, 'brain', conv, '.system_generated', 'logs');
+    mkdirSync(logsDir, { recursive: true });
+
+    const transcript = [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Run tests' },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        input_tokens: 14000,
+        cache_read_tokens: 0,
+        output_tokens: 300,
+        tool_calls: [{ name: 'run_command', args: { CommandLine: 'node --test' } }],
+      },
+      {
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        status: 'DONE',
+        content: '✔ detects <CONTEXT_SUMMARY> compaction checkpoints\n<CONTEXT_SUMMARY>\ntest fixture\n</CONTEXT_SUMMARY>',
+      },
+      {
+        step_index: 3,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        input_tokens: 1000,
+        cache_read_tokens: 14000,
+        output_tokens: 200,
+        content: 'All tests passed.',
+        tool_calls: [],
+      },
+    ];
+
+    writeFileSync(
+      join(logsDir, 'transcript_full.jsonl'),
+      transcript.map((x) => JSON.stringify(x)).join('\n') + '\n'
+    );
+
+    const report = analyzeConversation({
+      conversationId: conv,
+      appDataDirs: [env.appData],
+      workspacePaths: [env.workspace],
+    });
+
+    assert.equal(report.checkpoints.count, 0);
+    assert.equal(report.summary.totalActiveTokens, 15200);
+  } finally {
+    env.cleanup();
+  }
+});
