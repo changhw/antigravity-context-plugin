@@ -2,11 +2,12 @@
 name: context
 description: >-
   Displays the current conversation's token consumption grid, category breakdown,
-  prompt cache telemetry, compaction checkpoints, and tracked files — mirroring
-  `/context` from the Antigravity CLI (`agy`) — and provides a one-click pill to
-  open the live Context Usage panel in the auxiliary side pane. Activate when the
-  user runs `/context` or asks to inspect context window usage, token breakdown,
-  or loaded context files.
+  live/per-turn TTFT (time to first token) & streaming speed, prompt cache telemetry,
+  compaction checkpoints, and tracked files — mirroring `/context` from the
+  Antigravity CLI (`agy`) — and provides a one-click pill to open the live Context
+  Usage panel in the auxiliary side pane. Activate when the user runs `/context`
+  or asks to inspect context window usage, TTFT latency, token breakdown, or loaded
+  context files.
 ---
 
 # Context Usage (`/context`)

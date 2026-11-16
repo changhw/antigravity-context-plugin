@@ -5,7 +5,8 @@
  * Server, and falls back to Node's built-in `node:http` server when run with
  * `--standalone` for local development or automated testing.
  *
- * Read-only: writes no files and mutates no agent state.
+ * Continuously tracks live TTFT (prefill -> first token -> streaming speed)
+ * for active conversations via Language Server trajectory & generator metadata.
  */
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -18,8 +19,10 @@ import {
   formatCliContext,
   ID_RE,
   listConversations,
+  locateConversation,
   uriToPath,
 } from './analyzer.mjs';
+import { collectLiveTelemetry } from './ls_telemetry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -84,10 +87,69 @@ function parseWorkspaceParam(raw) {
 }
 
 // ---------------------------------------------------------------------------
+// Non-blocking background live TTFT watcher for active pane conversations
+// (keeps SidecarApp route handlers synchronous and sub-millisecond!)
+// ---------------------------------------------------------------------------
+
+const TELEMETRY_REFRESH_MS = 450;
+const TELEMETRY_IDLE_TTL_MS = 60_000;
+const telemetryWatches = new Map(); // convId -> { appData, snapshot, lastAskedAt, lastFetchedAt, pending }
+
+function refreshTelemetryWatch(convId, entry) {
+  if (entry.pending) return entry.pending;
+  entry.pending = collectLiveTelemetry(convId, entry.appData)
+    .then((snap) => {
+      if (snap) entry.snapshot = snap;
+      entry.lastFetchedAt = Date.now();
+    })
+    .catch(() => {
+      entry.lastFetchedAt = Date.now();
+    })
+    .finally(() => {
+      entry.pending = null;
+    });
+  return entry.pending;
+}
+
+function getOrWatchLiveTelemetry(convId, appData) {
+  if (!convId || !ID_RE.test(convId)) return null;
+  let entry = telemetryWatches.get(convId);
+  if (!entry) {
+    entry = {
+      appData: appData || '',
+      snapshot: null,
+      lastAskedAt: Date.now(),
+      lastFetchedAt: 0,
+      pending: null,
+    };
+    telemetryWatches.set(convId, entry);
+  }
+  entry.lastAskedAt = Date.now();
+  if (appData) entry.appData = appData;
+  if (Date.now() - entry.lastFetchedAt >= TELEMETRY_REFRESH_MS) {
+    refreshTelemetryWatch(convId, entry);
+  }
+  return entry.snapshot;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [convId, entry] of telemetryWatches.entries()) {
+    if (now - entry.lastAskedAt > TELEMETRY_IDLE_TTL_MS) {
+      telemetryWatches.delete(convId);
+      continue;
+    }
+    if (now - entry.lastFetchedAt >= TELEMETRY_REFRESH_MS) {
+      refreshTelemetryWatch(convId, entry);
+    }
+  }
+}, TELEMETRY_REFRESH_MS).unref();
+
+// ---------------------------------------------------------------------------
 // API route handlers
 // ---------------------------------------------------------------------------
 
-function handleContextRequest(data = {}, defaultConvId = '') {
+function buildContextResponse(data = {}, defaultConvId = '') {
   const requestedConv = typeof data.conversationId === 'string' && ID_RE.test(data.conversationId)
     ? data.conversationId
     : (defaultConvId && ID_RE.test(defaultConvId) ? defaultConvId : '');
@@ -95,12 +157,21 @@ function handleContextRequest(data = {}, defaultConvId = '') {
   const limit = Number(data.limit) > 0 ? Number(data.limit) : 0;
   const appDataDirs = findAppDataDirs();
 
+  let resolvedConv = requestedConv;
+  if (!resolvedConv) {
+    const recent = listConversations({ appDataDirs });
+    resolvedConv = recent[0]?.conversationId || '';
+  }
+  const located = resolvedConv ? locateConversation(resolvedConv, appDataDirs) : null;
+  const liveTelemetry = resolvedConv ? getOrWatchLiveTelemetry(resolvedConv, located?.appData || '') : null;
+
   const report = analyzeConversation({
-    conversationId: requestedConv,
+    conversationId: resolvedConv,
     appDataDirs,
     workspacePaths: workspaces,
     contextLimitOverride: limit,
-    title: requestedConv ? getConversationTitle(requestedConv) : '',
+    title: resolvedConv ? getConversationTitle(resolvedConv) : '',
+    liveTelemetry,
   });
 
   if (report.found && !report.title && report.conversationId) {
@@ -109,7 +180,9 @@ function handleContextRequest(data = {}, defaultConvId = '') {
   }
 
   const fullEtag = `${report.etag}|${report.title || ''}`;
-  if (data.etag && data.etag === fullEtag) {
+  // While actively waiting on first token or streaming, always return fresh live state
+  const isLiveActive = report.ttft?.live?.phase && report.ttft.live.phase !== 'idle';
+  if (!isLiveActive && data.etag && data.etag === fullEtag) {
     return {
       conversationId: report.conversationId,
       found: report.found,
@@ -159,7 +232,7 @@ async function start() {
       app.api(route, () => new Response(readFileSync(join(__dirname, file), 'utf-8'), { contentType }), 'GET');
     }
 
-    app.api('/api/context', (data) => handleContextRequest(data || {}, app.config?.conversationId || ''), 'GET');
+    app.api('/api/context', (data) => buildContextResponse(data || {}, app.config?.conversationId || ''), 'GET');
     app.api('/api/conversations', () => handleConversationsRequest(), 'GET');
 
     console.log(`[context_panel] starting SidecarApp; app data dirs: ${findAppDataDirs().join(', ')}`);
@@ -172,7 +245,7 @@ async function start() {
   const envPort = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT) || 0;
   const port = portIdx >= 0 && process.argv[portIdx + 1] ? Number(process.argv[portIdx + 1]) : (envPort || 8787);
 
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = url.pathname;
 
@@ -182,7 +255,6 @@ async function start() {
       return;
     }
     if (pathname === '/preload.js') {
-      // Standalone stub when running outside Antigravity iframe
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
       res.end('window.sidecar = window.sidecar || {};\n');
       return;
@@ -200,7 +272,16 @@ async function start() {
     }
     if (pathname === '/api/context') {
       const params = Object.fromEntries(url.searchParams.entries());
-      const body = handleContextRequest(params, process.env.ANTIGRAVITY_CONVERSATION_ID || '');
+      const defaultConv = process.env.ANTIGRAVITY_CONVERSATION_ID || '';
+      const conv = params.conversationId || defaultConv;
+      if (conv && ID_RE.test(conv)) {
+        const entry = telemetryWatches.get(conv);
+        if (!entry) {
+          getOrWatchLiveTelemetry(conv, '');
+          await telemetryWatches.get(conv)?.pending;
+        }
+      }
+      const body = buildContextResponse(params, defaultConv);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(body));
       return;

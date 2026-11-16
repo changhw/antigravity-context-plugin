@@ -14,6 +14,13 @@ import {
   listConversations,
   parseJsonc,
 } from '../sidecars/context_panel/analyzer.mjs';
+import {
+  extractLiveStepState,
+  normalizeGeneratorMetadataList,
+  parseProtoDurationMs,
+  parseProtoTimestampMs,
+  summarizeTtftStats,
+} from '../sidecars/context_panel/ls_telemetry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..');
@@ -337,6 +344,154 @@ test('GENERIC tool outputs mentioning <CONTEXT_SUMMARY> do not trigger false com
 
     assert.equal(report.checkpoints.count, 0);
     assert.equal(report.summary.totalActiveTokens, 15200);
+  } finally {
+    env.cleanup();
+  }
+});
+
+test('parseProtoDurationMs and parseProtoTimestampMs parse protojson formats accurately', () => {
+  assert.equal(parseProtoDurationMs('1.423192s'), 1423);
+  assert.equal(parseProtoDurationMs('0.085s'), 85);
+  assert.equal(parseProtoDurationMs({ seconds: '2', nanos: 350_000_000 }), 2350);
+  assert.equal(parseProtoDurationMs(null), null);
+
+  const ts = parseProtoTimestampMs('2026-11-16T21:14:26.690123456Z');
+  assert.equal(ts, Date.parse('2026-11-16T21:14:26.690Z'));
+  assert.equal(parseProtoTimestampMs('0001-01-01T00:00:00Z'), null);
+});
+
+test('live TTFT tracks prefill, streaming first-token lock-in, and completed P50/P95 stats', () => {
+  const env = makeTempEnv();
+  try {
+    const conv = '77777777-6666-5555-4444-333333333333';
+    const logsDir = join(env.appData, 'brain', conv, '.system_generated', 'logs');
+    mkdirSync(logsDir, { recursive: true });
+
+    const transcript = [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Turn 1' },
+      {
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        input_tokens: 15000,
+        cache_read_tokens: 0,
+        output_tokens: 800,
+        content: 'First reply.',
+        tool_calls: [],
+      },
+      { step_index: 2, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Turn 2' },
+      {
+        step_index: 3,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        status: 'DONE',
+        input_tokens: 2000,
+        cache_read_tokens: 15000,
+        output_tokens: 500,
+        content: 'Second reply.',
+        tool_calls: [],
+      },
+    ];
+    writeFileSync(
+      join(logsDir, 'transcript_full.jsonl'),
+      transcript.map((x) => JSON.stringify(x)).join('\n') + '\n'
+    );
+
+    const records = normalizeGeneratorMetadataList([
+      {
+        stepIndices: [1],
+        chatModel: {
+          timeToFirstToken: '1.250s',
+          streamingDuration: '8.000s',
+          modelDisplayName: 'Gemini 4 Carbon (High)',
+        },
+      },
+      {
+        stepIndices: [3],
+        chatModel: {
+          timeToFirstToken: '2.400s',
+          streamingDuration: '5.000s',
+          modelDisplayName: 'Gemini 4 Carbon (High)',
+        },
+      },
+    ]);
+
+    // 1. Completed idle state with P50/P95 and tok/s
+    const idleReport = analyzeConversation({
+      conversationId: conv,
+      appDataDirs: [env.appData],
+      workspacePaths: [env.workspace],
+      liveTelemetry: { records, liveStep: { active: false }, lsConnected: true },
+      nowMs: 1_700_000_010_000,
+    });
+    assert.equal(idleReport.ttft.live.phase, 'idle');
+    assert.equal(idleReport.ttft.stats.count, 2);
+    assert.equal(idleReport.ttft.stats.latestMs, 2400);
+    assert.equal(idleReport.ttft.stats.p50Ms, 1250);
+    assert.equal(idleReport.ttft.stats.p95Ms, 2400);
+    assert.equal(idleReport.ttft.latestOutputTokPerSec, 100); // 500 tok / 5.0s = 100 tok/s
+    assert.match(formatCliContext(idleReport), /⏱ TTFT latest: 2\.40s · P50: 1\.25s · P95: 2\.40s/);
+
+    // 2. Live prefill (waiting_first_token)
+    const startIso = '2026-11-16T22:30:00.000Z';
+    const startMs = Date.parse(startIso);
+    const livePrefillStep = extractLiveStepState(
+      [
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_GENERATING',
+          metadata: { createdAt: startIso },
+        },
+      ],
+      'CASCADE_RUN_STATUS_RUNNING',
+      startMs + 1850
+    );
+    assert.equal(livePrefillStep.phase, 'waiting_first_token');
+    assert.equal(livePrefillStep.elapsedMs, 1850);
+
+    // 3. First token arrives (viewableAt set while still streaming!)
+    const firstTokIso = '2026-11-16T22:30:01.620Z';
+    const liveStreamingStep = extractLiveStepState(
+      [
+        {
+          type: 'CORTEX_STEP_TYPE_PLANNER_RESPONSE',
+          status: 'CORTEX_STEP_STATUS_GENERATING',
+          metadata: { createdAt: startIso, viewableAt: firstTokIso },
+        },
+      ],
+      'CASCADE_RUN_STATUS_RUNNING',
+      startMs + 4000
+    );
+    assert.equal(liveStreamingStep.phase, 'streaming');
+    assert.equal(liveStreamingStep.ttftMs, 1620);
+    assert.equal(liveStreamingStep.streamingElapsedMs, 2380);
+
+    const streamingReport = analyzeConversation({
+      conversationId: conv,
+      appDataDirs: [env.appData],
+      workspacePaths: [env.workspace],
+      liveTelemetry: { records, liveStep: liveStreamingStep, lsConnected: true },
+      nowMs: startMs + 4000,
+    });
+    assert.equal(streamingReport.ttft.live.phase, 'streaming');
+    assert.equal(streamingReport.ttft.live.ttftMs, 1620);
+    assert.match(formatCliContext(streamingReport), /⏱ Live TTFT: 1\.62s · Streaming response/);
+
+    // 4. Stop hook contract outputs {"decision":"allow"}
+    const pluginData = mkdtempSync(join(tmpdir(), 'agy-stop-hook-'));
+    try {
+      const stopOut = execFileSync('node', [join(REPO_ROOT, 'hooks', 'record_session.mjs'), '--stop'], {
+        input: JSON.stringify({ conversationId: conv, hookEventName: 'Stop' }),
+        env: { ...process.env, PLUGIN_DATA: pluginData },
+        encoding: 'utf-8',
+      });
+      assert.deepEqual(JSON.parse(stopOut), { decision: 'allow' });
+    } finally {
+      rmSync(pluginData, { recursive: true, force: true });
+    }
+
+    assert.equal(summarizeTtftStats([]).count, 0);
   } finally {
     env.cleanup();
   }

@@ -72,6 +72,7 @@
           <span class="kpi-unit">tokens</span>
           <span id="kpi-pct" class="kpi-pct">(0.0%)</span>
           <span class="spacer"></span>
+          <span id="kpi-ttft" class="kpi-ttft-badge hidden" data-testid="ctx-ttft-badge" title="Time to first token (TTFT)"></span>
           <span id="kpi-cache" class="kpi-sub-badge hidden" title="Prompt cache hit rate on latest model turn"></span>
         </div>
         <div id="stacked-bar" class="stacked-bar" role="img" aria-label="Proportional context usage bar"></div>
@@ -170,6 +171,14 @@
 
       <!-- TAB 3: TURNS & TOOLS TELEMETRY -->
       <section id="tab-turns" class="tab-body" role="tabpanel" aria-labelledby="tabbtn-turns">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">TTFT &amp; Streaming Latency by Turn</span>
+            <span id="ttft-chart-meta" class="muted-note"></span>
+          </div>
+          <div id="ttft-chart-wrap" class="turns-chart-wrap" data-testid="ctx-ttft-chart"></div>
+        </div>
+
         <div class="card">
           <div class="card-head">
             <span class="card-title">Context Growth &amp; Prompt Cache by Turn</span>

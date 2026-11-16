@@ -8,6 +8,7 @@
  */
 (() => {
   const POLL_MS = 1500;
+  const ACTIVE_POLL_MS = 500;
   const IDLE_POLL_MS = 3000;
   const $ = (id) => document.getElementById(id);
 
@@ -19,6 +20,7 @@
     limitOverride: Number(params.get('limit')) || 0,
     etag: '',
     report: null,
+    reportReceivedAtMs: 0,
     conversations: [],
     workspaces: [],
     hoveredCategory: null,
@@ -66,6 +68,19 @@
 
   function fmtExact(n) {
     return (Number(n) || 0).toLocaleString('en-US');
+  }
+
+  function fmtMs(ms, decimals = 2) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    return `${(ms / 1000).toFixed(decimals)}s`;
+  }
+
+  function ttftToneClass(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';
+    if (ms <= 2500) return 'fast';
+    if (ms <= 6000) return 'warn';
+    return 'slow';
   }
 
   let toastTimer = 0;
@@ -221,6 +236,8 @@
       cacheBadge.classList.add('hidden');
     }
 
+    renderLiveTtftIndicators();
+
     // Stacked proportional bar
     const segs = r.breakdown
       .filter((b) => b.tokens > 0)
@@ -349,7 +366,43 @@
           </div>`
         : '';
 
-    $('checkpoints-body').innerHTML = ckptStatus + cacheMeter;
+    const ttftStats = r.ttft?.stats || {};
+    const speedVal = r.ttft?.latestOutputTokPerSec
+      ? `${r.ttft.latestOutputTokPerSec} tok/s`
+      : r.ttft?.avgOutputTokPerSec
+        ? `${r.ttft.avgOutputTokPerSec} tok/s`
+        : '—';
+    const prefillSub = r.ttft?.latestPrefillTokPerSec
+      ? `prefill ${fmtTok(r.ttft.latestPrefillTokPerSec)}/s`
+      : ttftStats.count
+        ? `${ttftStats.count} turn${ttftStats.count === 1 ? '' : 's'} measured`
+        : 'live on active turns';
+
+    const ttftGrid = `<div class="ttft-metrics-grid" data-testid="ctx-ttft-grid">
+      <div class="ttft-tile">
+        <span id="ttft-tile-primary-label" class="ttft-tile-label">Live / Latest TTFT</span>
+        <span id="ttft-tile-primary-val" class="ttft-tile-val">—</span>
+        <span id="ttft-tile-primary-sub" class="ttft-tile-sub">${esc(prefillSub)}</span>
+      </div>
+      <div class="ttft-tile">
+        <span class="ttft-tile-label">Median (P50)</span>
+        <span class="ttft-tile-val">${esc(fmtMs(ttftStats.p50Ms))}</span>
+        <span class="ttft-tile-sub">${ttftStats.minMs != null ? esc(`min ${fmtMs(ttftStats.minMs)}`) : '—'}</span>
+      </div>
+      <div class="ttft-tile">
+        <span class="ttft-tile-label">P95 TTFT</span>
+        <span class="ttft-tile-val">${esc(fmtMs(ttftStats.p95Ms))}</span>
+        <span class="ttft-tile-sub">${ttftStats.maxMs != null ? esc(`max ${fmtMs(ttftStats.maxMs)}`) : '—'}</span>
+      </div>
+      <div class="ttft-tile">
+        <span class="ttft-tile-label">Stream Speed</span>
+        <span class="ttft-tile-val">${esc(speedVal)}</span>
+        <span class="ttft-tile-sub">${r.ttft?.latestStreamingMs != null ? esc(`stream ${fmtMs(r.ttft.latestStreamingMs, 1)}`) : 'output rate'}</span>
+      </div>
+    </div>`;
+
+    $('checkpoints-body').innerHTML = ttftGrid + ckptStatus + cacheMeter;
+    renderLiveTtftIndicators();
 
     // Overview Tracked Files sections (matching agy CLI /context)
     const groups = [
@@ -461,12 +514,132 @@
     $('files-list').innerHTML = html || `<div class="card"><div class="file-empty-inline">No tracked files match "${esc(q)}".</div></div>`;
   }
 
+  function renderLiveTtftIndicators() {
+    const r = state.report;
+    const badge = $('kpi-ttft');
+    if (!r || !badge) return;
+    const ttft = r.ttft || {};
+    const live = ttft.live || { phase: 'idle' };
+    const stats = ttft.stats || {};
+    const clientDeltaMs = state.reportReceivedAtMs > 0 ? Math.max(0, Date.now() - state.reportReceivedAtMs) : 0;
+
+    const tileLabel = $('ttft-tile-primary-label');
+    const tileVal = $('ttft-tile-primary-val');
+    const tileSub = $('ttft-tile-primary-sub');
+
+    if (live.phase === 'waiting_first_token') {
+      const elapsed = (Number(live.elapsedMs) || 0) + clientDeltaMs;
+      const text = fmtMs(elapsed, 1);
+      badge.className = 'kpi-ttft-badge prefill';
+      badge.textContent = `⏳ TTFT ${text}…`;
+      badge.title = `Waiting for 1st token (prefill in progress: ${text})`;
+      badge.classList.remove('hidden');
+      if (tileLabel) tileLabel.textContent = 'Prefill (Live TTFT)';
+      if (tileVal) tileVal.textContent = `${text}…`;
+      if (tileSub) tileSub.textContent = 'waiting for 1st token';
+      return;
+    }
+
+    if (live.phase === 'streaming') {
+      const streamElapsed = (Number(live.streamingElapsedMs) || 0) + clientDeltaMs;
+      const lockedTtft = fmtMs(live.ttftMs, 2);
+      badge.className = 'kpi-ttft-badge streaming';
+      badge.textContent = `⚡ TTFT ${lockedTtft} · ${fmtMs(streamElapsed, 1)}`;
+      badge.title = `First token received in ${lockedTtft}; response currently streaming (${fmtMs(streamElapsed, 1)} elapsed)`;
+      badge.classList.remove('hidden');
+      if (tileLabel) tileLabel.textContent = 'Live Turn TTFT';
+      if (tileVal) tileVal.textContent = lockedTtft;
+      if (tileSub) tileSub.textContent = `streaming ${fmtMs(streamElapsed, 1)}…`;
+      return;
+    }
+
+    if (stats.count > 0 && stats.latestMs != null) {
+      const tone = ttftToneClass(stats.latestMs);
+      const speedSuffix = ttft.latestOutputTokPerSec ? ` · ${ttft.latestOutputTokPerSec} tok/s` : '';
+      badge.className = `kpi-ttft-badge ${tone}`.trim();
+      badge.textContent = `⏱ TTFT ${fmtMs(stats.latestMs)}${speedSuffix}`;
+      badge.title = `Latest TTFT: ${fmtMs(stats.latestMs)} · Median (P50): ${fmtMs(stats.p50Ms)} · P95: ${fmtMs(stats.p95Ms)} (${stats.count} turns)`;
+      badge.classList.remove('hidden');
+      if (tileLabel) tileLabel.textContent = 'Latest TTFT';
+      if (tileVal) tileVal.textContent = fmtMs(stats.latestMs);
+      return;
+    }
+
+    badge.className = 'kpi-ttft-badge';
+    badge.textContent = '⏱ TTFT live';
+    badge.title = 'Live TTFT stopwatch activates automatically when the model is called';
+    badge.classList.remove('hidden');
+    if (tileLabel) tileLabel.textContent = 'Live TTFT';
+    if (tileVal) tileVal.textContent = 'Idle';
+  }
+
   function renderTurnsAndTools() {
     const r = state.report;
     if (!r) return;
     const { turns, tools, summary } = r;
 
-    // SVG Turn-by-turn stacked bar chart (cached vs uncached input tokens)
+    // 1. SVG Turn-by-turn TTFT & Streaming Latency chart
+    const measuredTurns = turns.filter((t) => typeof t.ttftMs === 'number' && Number.isFinite(t.ttftMs));
+    if (!measuredTurns.length) {
+      $('ttft-chart-meta').textContent = r.ttft?.live?.phase !== 'idle' ? 'Measuring live turn…' : 'Awaiting turn telemetry';
+      $('ttft-chart-wrap').innerHTML = `<div class="file-empty-inline">Per-turn TTFT and streaming durations appear here automatically as Language Server generator telemetry is recorded.</div>`;
+    } else {
+      const maxLatMs = Math.max(
+        ...measuredTurns.map((t) => (t.ttftMs || 0) + (t.streamingMs || 0)),
+        500
+      );
+      $('ttft-chart-meta').textContent = `P50 TTFT: ${fmtMs(r.ttft?.stats?.p50Ms)} · Peak total: ${fmtMs(maxLatMs, 1)}`;
+      const W = Math.max(360, turns.length * 22 + 48);
+      const H = 144;
+      const padL = 44;
+      const padR = 10;
+      const padT = 12;
+      const padB = 24;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+      const barGap = 3;
+      const barW = Math.max(6, Math.min(26, plotW / turns.length - barGap));
+
+      const latBars = turns
+        .map((t, idx) => {
+          const x = padL + idx * ((plotW - barW) / Math.max(1, turns.length - 1 || 1));
+          if (typeof t.ttftMs !== 'number') {
+            return `<rect x="${x.toFixed(1)}" y="${(padT + plotH - 2).toFixed(1)}" width="${barW.toFixed(1)}" height="2" fill="var(--ctx-line)"><title>Turn #${t.turnNumber}: historical turn (no TTFT metadata)</title></rect>`;
+          }
+          const ttftH = (t.ttftMs / maxLatMs) * plotH;
+          const streamH = ((t.streamingMs || 0) / maxLatMs) * plotH;
+          const yTtft = padT + plotH - ttftH;
+          const yStream = yTtft - streamH;
+          const speedLine = t.outputTokPerSec ? `\nOutput speed: ${t.outputTokPerSec} tok/s` : '';
+          const prefillLine = t.prefillTokPerSec ? `\nPrefill rate: ${fmtTok(t.prefillTokPerSec)} tok/s` : '';
+          const tip = `Turn #${t.turnNumber} (step ${t.stepIndex})\nTTFT: ${fmtMs(t.ttftMs)}\nStreaming: ${fmtMs(t.streamingMs)}${speedLine}${prefillLine}\nInput: ${fmtExact(t.totalInputTokens)} tok (${(t.cacheHitRatio * 100).toFixed(1)}% cached)`;
+          return `<g>
+            <title>${esc(tip)}</title>
+            ${streamH > 0 ? `<rect x="${x.toFixed(1)}" y="${yStream.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(0.5, streamH).toFixed(1)}" rx="2" fill="var(--cat-agent)" opacity="0.78"/>` : ''}
+            <rect x="${x.toFixed(1)}" y="${yTtft.toFixed(1)}" width="${barW.toFixed(1)}" height="${Math.max(1.5, ttftH).toFixed(1)}" rx="2" fill="var(--cat-tools)"/>
+          </g>`;
+        })
+        .join('');
+
+      $('ttft-chart-wrap').innerHTML = `
+        <svg class="turns-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="TTFT and streaming duration per turn">
+          <line x1="${padL}" y1="${padT}" x2="${W - padR}" y2="${padT}" stroke="var(--ctx-line)"/>
+          <line x1="${padL}" y1="${padT + plotH / 2}" x2="${W - padR}" y2="${padT + plotH / 2}" stroke="var(--ctx-line)" stroke-dasharray="2 3"/>
+          <line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="var(--ctx-line)"/>
+          <text x="${padL - 5}" y="${padT + 8}" text-anchor="end" font-size="10" fill="var(--ctx-muted)">${esc(fmtMs(maxLatMs, 1))}</text>
+          <text x="${padL - 5}" y="${padT + plotH / 2 + 3}" text-anchor="end" font-size="10" fill="var(--ctx-muted)">${esc(fmtMs(Math.round(maxLatMs / 2), 1))}</text>
+          <text x="${padL - 5}" y="${padT + plotH}" text-anchor="end" font-size="10" fill="var(--ctx-muted)">0ms</text>
+          ${latBars}
+          <text x="${padL}" y="${H - 6}" font-size="10" fill="var(--ctx-muted)">Turn 1</text>
+          <text x="${W - padR}" y="${H - 6}" text-anchor="end" font-size="10" fill="var(--ctx-muted)">Turn ${turns.length}</text>
+        </svg>
+        <div class="grid-legend">
+          <span><b style="color:var(--cat-tools)">■</b> TTFT (time to 1st token)</span>
+          <span><b style="color:var(--cat-agent)">■</b> Streaming duration</span>
+        </div>`;
+    }
+
+    // 2. SVG Turn-by-turn stacked bar chart (cached vs uncached input tokens)
     if (!turns.length) {
       $('chart-meta').textContent = '0 turns';
       $('turns-chart-wrap').innerHTML = `<div class="file-empty-inline">Waiting for first model turn…</div>`;
@@ -607,7 +780,11 @@
         if (!ctxRes.unchanged) {
           state.etag = ctxRes.etag || '';
           state.report = ctxRes;
+          state.reportReceivedAtMs = Date.now();
           renderAll();
+        }
+        if (state.report?.ttft?.live?.phase && state.report.ttft.live.phase !== 'idle') {
+          delay = ACTIVE_POLL_MS;
         }
         showView('panel');
       }
@@ -774,6 +951,14 @@
       selectTab(TABS[Number(e.key) - 1]);
     }
   });
+
+  // Smooth 100ms live stopwatch ticker during active prefill / streaming phases
+  setInterval(() => {
+    const phase = state.report?.ttft?.live?.phase;
+    if (phase === 'waiting_first_token' || phase === 'streaming') {
+      renderLiveTtftIndicators();
+    }
+  }, 100);
 
   // Initialize
   if (state.limitOverride > 0) {

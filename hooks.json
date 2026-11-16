@@ -13,6 +13,20 @@
         "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
         "timeout": 5
       }
+    ],
+    "PostInvocation": [
+      {
+        "type": "command",
+        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs --stop 2>/dev/null || printf '{\"decision\":\"allow\"}\\n'",
+        "timeout": 5
+      }
     ]
   }
 }

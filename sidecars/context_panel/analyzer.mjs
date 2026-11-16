@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { homedir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseProtoTimestampMs, readCachedTelemetry, summarizeTtftStats } from './ls_telemetry.mjs';
 
 export const ID_RE = /^[0-9a-f-]{8,}$/i;
 
@@ -629,6 +630,8 @@ export function analyzeConversation({
   workspacePaths = [],
   contextLimitOverride = 0,
   title = '',
+  liveTelemetry = null,
+  nowMs = Date.now(),
 } = {}) {
   // Resolve target conversation (explicit or most recently active)
   let targetConv = conversationId && ID_RE.test(conversationId) ? conversationId : '';
@@ -662,14 +665,14 @@ export function analyzeConversation({
     targetConv,
     transcriptPath,
     `${trStat.mtime}:${trStat.size}`,
-    hookMeta?.updatedAt || '',
+    hookMeta?.modelName || '',
     explicitWs.join(','),
     String(contextLimitOverride || 0),
     title || '',
   ].join('|');
 
-  const cached = analysisCache.get(cacheKey);
-  if (cached) return cached;
+  let baseReport = analysisCache.get(cacheKey);
+  if (!baseReport) {
 
   // Parse transcript lines
   const steps = [];
@@ -1427,7 +1430,188 @@ export function analyzeConversation({
 
   if (analysisCache.size > 64) analysisCache.clear();
   analysisCache.set(cacheKey, report);
-  return report;
+  baseReport = report;
+  }
+
+  const telemetry = liveTelemetry || readCachedTelemetry(appData, targetConv);
+  return attachTtftTelemetry(baseReport, {
+    telemetry,
+    hookMeta,
+    trMtime: trStat.mtime || 0,
+    nowMs,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Merge per-turn & live in-flight TTFT / streaming telemetry onto base report
+// ---------------------------------------------------------------------------
+
+function attachTtftTelemetry(baseReport, { telemetry, hookMeta, trMtime, nowMs }) {
+  const records = Array.isArray(telemetry?.records) ? telemetry.records : [];
+  const byStep = new Map();
+  for (const rec of records) {
+    if (Array.isArray(rec.stepIndices)) {
+      for (const idx of rec.stepIndices) byStep.set(Number(idx), rec);
+    } else if (Number.isFinite(rec.primaryStepIndex)) {
+      byStep.set(Number(rec.primaryStepIndex), rec);
+    }
+  }
+
+  const canAlignTail = records.length > 0 && records.length <= baseReport.turns.length;
+  const tailStart = baseReport.turns.length - records.length;
+
+  const enrichedTurns = baseReport.turns.map((t, pos) => {
+    let rec = byStep.get(t.stepIndex) || null;
+    if (!rec && canAlignTail && byStep.size === 0 && pos >= tailStart) {
+      rec = records[pos - tailStart] || null;
+    }
+    const ttftMs = typeof rec?.ttftMs === 'number' && Number.isFinite(rec.ttftMs) ? rec.ttftMs : null;
+    const streamingMs = typeof rec?.streamingMs === 'number' && Number.isFinite(rec.streamingMs) ? rec.streamingMs : null;
+    const outputTokPerSec =
+      streamingMs && streamingMs >= 40 && t.outputTokens > 0
+        ? Number(((t.outputTokens / streamingMs) * 1000).toFixed(1))
+        : null;
+    const prefillTokPerSec =
+      ttftMs && ttftMs >= 20 && t.totalInputTokens > 0
+        ? Math.round((t.totalInputTokens / ttftMs) * 1000)
+        : null;
+
+    return {
+      ...t,
+      ttftMs,
+      streamingMs,
+      outputTokPerSec,
+      prefillTokPerSec,
+    };
+  });
+
+  // Fallback for the latest turn if LS liveStep captured viewableAt - createdAt before generatorMetadata landed
+  if (enrichedTurns.length > 0) {
+    const lastTurn = enrichedTurns[enrichedTurns.length - 1];
+    const lsLastTtft = telemetry?.liveStep?.lastStepTtftMs;
+    if (lastTurn.ttftMs === null && typeof lsLastTtft === 'number' && lsLastTtft >= 0) {
+      lastTurn.ttftMs = lsLastTtft;
+      if (typeof telemetry?.liveStep?.lastStepStreamingMs === 'number') {
+        lastTurn.streamingMs = telemetry.liveStep.lastStepStreamingMs;
+        if (lastTurn.streamingMs >= 40 && lastTurn.outputTokens > 0) {
+          lastTurn.outputTokPerSec = Number(((lastTurn.outputTokens / lastTurn.streamingMs) * 1000).toFixed(1));
+        }
+      }
+    }
+  }
+
+  const measuredTtfts = enrichedTurns
+    .map((t) => t.ttftMs)
+    .filter((v) => typeof v === 'number' && Number.isFinite(v) && v >= 0);
+  const stats = summarizeTtftStats(measuredTtfts);
+
+  let latestStreamingMs = null;
+  let latestOutputTokPerSec = null;
+  let latestPrefillTokPerSec = null;
+  let sumStreamOutTok = 0;
+  let sumStreamMs = 0;
+
+  for (const t of enrichedTurns) {
+    if (typeof t.streamingMs === 'number' && t.streamingMs > 0) {
+      latestStreamingMs = t.streamingMs;
+      if (t.outputTokens > 0) {
+        sumStreamOutTok += t.outputTokens;
+        sumStreamMs += t.streamingMs;
+      }
+    }
+    if (typeof t.outputTokPerSec === 'number') latestOutputTokPerSec = t.outputTokPerSec;
+    if (typeof t.prefillTokPerSec === 'number') latestPrefillTokPerSec = t.prefillTokPerSec;
+  }
+
+  const avgOutputTokPerSec = sumStreamMs >= 40
+    ? Number(((sumStreamOutTok / sumStreamMs) * 1000).toFixed(1))
+    : null;
+
+  // Determine live in-flight TTFT phase:
+  //   'waiting_first_token' (prefill) -> 'streaming' (first token arrived!) -> 'idle'
+  let live = {
+    phase: 'idle',
+    startedAtMs: null,
+    firstTokenAtMs: null,
+    elapsedMs: null,
+    ttftMs: stats.latestMs,
+    streamingElapsedMs: null,
+    source: 'idle',
+  };
+
+  const liveStep = telemetry?.liveStep;
+  if (liveStep?.active && liveStep.phase === 'streaming') {
+    live = {
+      phase: 'streaming',
+      startedAtMs: liveStep.startedAtMs,
+      firstTokenAtMs: liveStep.firstTokenAtMs,
+      elapsedMs: Math.max(0, nowMs - (liveStep.startedAtMs || nowMs)),
+      ttftMs: liveStep.ttftMs,
+      streamingElapsedMs: Math.max(0, nowMs - (liveStep.firstTokenAtMs || nowMs)),
+      source: 'ls_live_step',
+    };
+  } else if (liveStep?.active && liveStep.phase === 'waiting_first_token') {
+    const start = liveStep.startedAtMs || nowMs;
+    live = {
+      phase: 'waiting_first_token',
+      startedAtMs: start,
+      firstTokenAtMs: null,
+      elapsedMs: Math.max(0, nowMs - start),
+      ttftMs: null,
+      streamingElapsedMs: null,
+      source: 'ls_live_step',
+    };
+  } else if (hookMeta?.inFlight && !liveStep?.activeToolStep) {
+    const hookStartMs = parseProtoTimestampMs(hookMeta.invocationStartedAt);
+    const preMtime = Number(hookMeta.preInvocationTranscriptMtime) || 0;
+    const transcriptUnchangedSinceStart = preMtime > 0 ? trMtime <= preMtime + 50 : trMtime <= (hookStartMs || 0) + 50;
+    if (hookStartMs && nowMs - hookStartMs >= 0 && nowMs - hookStartMs < 300_000 && transcriptUnchangedSinceStart) {
+      live = {
+        phase: 'waiting_first_token',
+        startedAtMs: hookStartMs,
+        firstTokenAtMs: null,
+        elapsedMs: Math.max(0, nowMs - hookStartMs),
+        ttftMs: null,
+        streamingElapsedMs: null,
+        source: 'hook_pre_invocation',
+      };
+    }
+  }
+
+  // Upgrade display model name if LS generator metadata provides a cleaner human-readable name
+  let resolvedModelName = baseReport.model.name;
+  if ((!resolvedModelName || resolvedModelName === 'Auto (Gemini)') && records.length > 0) {
+    const lastRecModel = records[records.length - 1]?.modelDisplayName;
+    if (lastRecModel) resolvedModelName = lastRecModel;
+  }
+
+  const ttftKey = [
+    records.length,
+    stats.latestMs ?? '-',
+    live.phase,
+    live.startedAtMs ?? '-',
+    live.ttftMs ?? '-',
+  ].join(':');
+
+  return {
+    ...baseReport,
+    etag: `${baseReport.etag}|ttft=${ttftKey}`,
+    serverTimeMs: nowMs,
+    model: {
+      ...baseReport.model,
+      name: resolvedModelName,
+    },
+    turns: enrichedTurns,
+    ttft: {
+      live,
+      stats,
+      latestStreamingMs,
+      latestOutputTokPerSec,
+      latestPrefillTokPerSec,
+      avgOutputTokPerSec,
+      lsConnected: Boolean(telemetry?.lsConnected),
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,6 +1625,12 @@ function fmtTok(n) {
   if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2)}M`;
   if (v >= 10_000) return `${(v / 1_000).toFixed(1)}k`;
   return v.toLocaleString('en-US');
+}
+
+function fmtDurationMs(ms) {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
 }
 
 export function formatCliContext(report) {
@@ -1494,6 +1684,21 @@ export function formatCliContext(report) {
     `  ⚡ Latest turn input: ${fmtTok(summary.latestCacheReadTokens)} cached + ${fmtTok(summary.latestUncachedInputTokens)} uncached` +
     ` · Output cumulative: ${fmtTok(summary.cumulativeOutputTokens)} across ${summary.modelTurns} turn(s)`
   );
+  if (report.ttft) {
+    const { live, stats, latestOutputTokPerSec } = report.ttft;
+    if (live?.phase === 'waiting_first_token') {
+      lines.push(`  ⏱ Live TTFT: waiting for 1st token… ${fmtDurationMs(live.elapsedMs)} elapsed`);
+    } else if (live?.phase === 'streaming') {
+      lines.push(
+        `  ⏱ Live TTFT: ${fmtDurationMs(live.ttftMs)} · Streaming response (${fmtDurationMs(live.streamingElapsedMs)} elapsed)`
+      );
+    } else if (stats?.count > 0) {
+      const speedPart = latestOutputTokPerSec ? ` · Stream: ${latestOutputTokPerSec} tok/s` : '';
+      lines.push(
+        `  ⏱ TTFT latest: ${fmtDurationMs(stats.latestMs)} · P50: ${fmtDurationMs(stats.p50Ms)} · P95: ${fmtDurationMs(stats.p95Ms)} (${stats.count} turn${stats.count === 1 ? '' : 's'})${speedPart}`
+      );
+    }
+  }
 
   lines.push(hr);
   lines.push('Tracked Files');

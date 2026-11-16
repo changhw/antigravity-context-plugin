@@ -302,6 +302,87 @@ kbd {
   color: var(--status-ok);
 }
 
+.kpi-ttft-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--ctx-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--ctx-fill);
+  color: var(--ctx-fg-2);
+  border: 1px solid var(--ctx-line);
+}
+.kpi-ttft-badge.fast {
+  background: color-mix(in srgb, var(--status-ok) 13%, transparent);
+  color: var(--status-ok);
+  border-color: color-mix(in srgb, var(--status-ok) 28%, transparent);
+}
+.kpi-ttft-badge.warn {
+  background: color-mix(in srgb, var(--status-warn) 14%, transparent);
+  color: var(--status-warn);
+  border-color: color-mix(in srgb, var(--status-warn) 30%, transparent);
+}
+.kpi-ttft-badge.slow {
+  background: color-mix(in srgb, var(--status-err) 13%, transparent);
+  color: var(--status-err);
+  border-color: color-mix(in srgb, var(--status-err) 30%, transparent);
+}
+.kpi-ttft-badge.prefill {
+  background: color-mix(in srgb, var(--cat-user) 16%, transparent);
+  color: var(--cat-user);
+  border-color: color-mix(in srgb, var(--cat-user) 36%, transparent);
+  animation: pulse-soft 1.2s ease-in-out infinite;
+}
+.kpi-ttft-badge.streaming {
+  background: color-mix(in srgb, var(--cat-system) 16%, transparent);
+  color: var(--cat-system);
+  border-color: color-mix(in srgb, var(--cat-system) 36%, transparent);
+}
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.ttft-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+@media (min-width: 480px) {
+  .ttft-metrics-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+.ttft-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border-radius: var(--r-md);
+  background: var(--ctx-fill);
+}
+.ttft-tile-label {
+  font-size: 10.5px;
+  color: var(--ctx-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.ttft-tile-val {
+  font-family: var(--ctx-mono);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ctx-fg);
+}
+.ttft-tile-sub {
+  font-family: var(--ctx-mono);
+  font-size: 10.5px;
+  color: var(--ctx-muted);
+}
+
 .stacked-bar {
   display: flex;
   width: 100%;
