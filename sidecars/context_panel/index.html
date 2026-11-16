@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Context Usage</title>
+  <script src="/preload.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:ROND,opsz,slnt,wdth,wght@0..100,6..144,-10..0,92..100,100..1000&family=Google+Sans+Code:ital,wght@0,300..800;1,300..800&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Skeleton loading state -->
+  <div id="loading" class="loading" data-testid="ctx-loading" aria-live="polite" aria-busy="true">
+    <div class="skel-header">
+      <span class="skel skel-line" style="width: 48%; height: 14px"></span>
+      <span class="skel skel-line" style="width: 68%; height: 10px"></span>
+    </div>
+    <div class="skel-grid-card">
+      <span class="skel" style="height: 148px; border-radius: 8px"></span>
+    </div>
+    <div class="skel-rows">
+      <span class="skel skel-line" style="width: 90%"></span>
+      <span class="skel skel-line" style="width: 78%"></span>
+      <span class="skel skel-line" style="width: 84%"></span>
+    </div>
+    <p class="loading-caption">Inspecting conversation context window…</p>
+  </div>
+
+  <!-- Main Context Usage Panel -->
+  <div id="panel" class="panel hidden" data-testid="ctx-panel">
+    <header class="header">
+      <div class="header-top">
+        <div class="title-wrap">
+          <span class="cmd-pill" title="Matches agy CLI /context">/context</span>
+          <h1 id="conv-title" class="conv-title" data-testid="ctx-title">Context Usage</h1>
+        </div>
+        <div class="header-actions">
+          <button id="help-btn" type="button" class="icon-btn" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+          <span id="live" class="live" role="status" title="Updates automatically as the conversation progresses" data-testid="ctx-live">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="live-label">Live</span>
+          </span>
+        </div>
+      </div>
+
+      <div class="controls-bar">
+        <span class="select-wrap" title="Switch inspected conversation">
+          <select id="conv-select" aria-label="Select conversation" data-testid="ctx-conv-select">
+            <option value="">Current conversation</option>
+          </select>
+        </span>
+        <span id="model-badge" class="meta-chip" title="Active model">Auto</span>
+        <span class="select-wrap sm" title="Context window limit">
+          <select id="limit-select" aria-label="Context window limit" data-testid="ctx-limit-select">
+            <option value="0">Auto limit</option>
+            <option value="1048576">1.0M (1,048,576)</option>
+            <option value="2097152">2.0M (2,097,152)</option>
+            <option value="200000">200k</option>
+            <option value="131072">128k</option>
+          </select>
+        </span>
+      </div>
+
+      <!-- Headline KPI usage bar -->
+      <div class="kpi-strip">
+        <div class="kpi-numbers">
+          <span id="kpi-used" class="kpi-used">0</span>
+          <span class="kpi-sep">/</span>
+          <span id="kpi-limit" class="kpi-limit">1.0M</span>
+          <span class="kpi-unit">tokens</span>
+          <span id="kpi-pct" class="kpi-pct">(0.0%)</span>
+          <span class="spacer"></span>
+          <span id="kpi-cache" class="kpi-sub-badge hidden" title="Prompt cache hit rate on latest model turn"></span>
+        </div>
+        <div id="stacked-bar" class="stacked-bar" role="img" aria-label="Proportional context usage bar"></div>
+      </div>
+
+      <nav class="tabs" role="tablist" aria-label="Context views" data-testid="ctx-tabs">
+        <button type="button" role="tab" id="tabbtn-overview" aria-controls="tab-overview" aria-selected="true" data-tab="overview" class="tab active">Overview</button>
+        <button type="button" role="tab" id="tabbtn-files" aria-controls="tab-files" aria-selected="false" tabindex="-1" data-tab="files" class="tab">Tracked Files<span id="tab-count-files" class="tab-count"></span></button>
+        <button type="button" role="tab" id="tabbtn-turns" aria-controls="tab-turns" aria-selected="false" tabindex="-1" data-tab="turns" class="tab">Turns &amp; Tools<span id="tab-count-turns" class="tab-count"></span></button>
+        <button type="button" role="tab" id="tabbtn-raw" aria-controls="tab-raw" aria-selected="false" tabindex="-1" data-tab="raw" class="tab">CLI / JSON</button>
+      </nav>
+    </header>
+
+    <main class="main">
+      <!-- Keyboard shortcut legend popover -->
+      <div id="shortcuts-card" class="card shortcuts-card hidden" role="region" aria-label="Keyboard shortcuts">
+        <div class="card-head">
+          <span class="card-title">CLI Navigation Shortcuts</span>
+          <button id="shortcuts-close" type="button" class="ghost-btn sm">Esc / Close</button>
+        </div>
+        <div class="shortcuts-grid">
+          <div><kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd></div><div>Scroll up / down one line</div>
+          <div><kbd>PgUp</kbd> / <kbd>PgDn</kbd></div><div>Scroll up / down one page</div>
+          <div><kbd>Ctrl+U</kbd> / <kbd>Ctrl+D</kbd></div><div>Scroll up / down half a page</div>
+          <div><kbd>g</kbd> / <kbd>Shift+G</kbd></div><div>Jump to top / bottom</div>
+          <div><kbd>1</kbd>–<kbd>4</kbd> or <kbd>←</kbd> / <kbd>→</kbd></div><div>Switch panel tabs</div>
+        </div>
+      </div>
+
+      <!-- TAB 1: OVERVIEW (Faithful agy CLI /context layout) -->
+      <section id="tab-overview" class="tab-body active" role="tabpanel" aria-labelledby="tabbtn-overview">
+        <div id="compact-banner" class="alert-banner hidden"></div>
+
+        <!-- Proportional Cell Grid + Breakdown Rows (side-by-side on wide panes, stacked on narrow) -->
+        <div class="card context-hero-card">
+          <div class="context-split">
+            <div class="grid-col">
+              <div class="section-subhead">
+                <span>Context Window Grid</span>
+                <span id="grid-scale-label" class="muted-note">20×10 · 0.5% / cell</span>
+              </div>
+              <div id="cell-grid" class="cell-grid" role="grid" aria-label="Context usage cell grid" data-testid="ctx-grid"></div>
+              <div id="grid-inspector" class="grid-inspector">Hover a cell or category row to inspect</div>
+              <div class="grid-legend">
+                <span><b class="sym-conv">◉</b> Active turns</span>
+                <span><b class="sym-sys">⛁</b> System / MCP</span>
+                <span><b class="sym-ckpt">⊠</b> Checkpoint</span>
+                <span><b class="sym-free">□</b> Free</span>
+              </div>
+            </div>
+
+            <div class="breakdown-col">
+              <div class="section-subhead">
+                <span>Category Breakdown</span>
+                <button id="clear-highlight" type="button" class="link-btn hidden">Reset filter</button>
+              </div>
+              <div id="breakdown-rows" class="breakdown-rows" data-testid="ctx-breakdown"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Session State & Checkpoints -->
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">Session State &amp; Checkpoints</span>
+            <span id="turns-summary-badge" class="muted-note"></span>
+          </div>
+          <div id="checkpoints-body" class="checkpoints-body"></div>
+        </div>
+
+        <!-- Tracked Files Overview (matches bottom half of agy CLI /context) -->
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">Tracked Files</span>
+            <button id="jump-files-tab" type="button" class="link-btn">Filter &amp; search →</button>
+          </div>
+          <div id="overview-files" class="overview-files" data-testid="ctx-overview-files"></div>
+        </div>
+
+        <footer class="cli-footer-hint">
+          <span><kbd>j</kbd>/<kbd>k</kbd> scroll · <kbd>Ctrl+U</kbd>/<kbd>D</kbd> half-page · <kbd>g</kbd>/<kbd>G</kbd> top/bottom · <kbd>?</kbd> shortcuts</span>
+        </footer>
+      </section>
+
+      <!-- TAB 2: TRACKED FILES EXPLORER -->
+      <section id="tab-files" class="tab-body" role="tabpanel" aria-labelledby="tabbtn-files">
+        <div class="files-toolbar">
+          <label class="search">
+            <svg class="icon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3.25 3.25"/></svg>
+            <input id="file-search" type="search" placeholder="Filter tracked files by name or path…" autocomplete="off">
+          </label>
+          <div id="file-kind-chips" class="chips-row" role="group" aria-label="File category filter"></div>
+        </div>
+        <div id="files-list" class="files-list" data-testid="ctx-files-list"></div>
+      </section>
+
+      <!-- TAB 3: TURNS & TOOLS TELEMETRY -->
+      <section id="tab-turns" class="tab-body" role="tabpanel" aria-labelledby="tabbtn-turns">
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">Context Growth &amp; Prompt Cache by Turn</span>
+            <span id="chart-meta" class="muted-note"></span>
+          </div>
+          <div id="turns-chart-wrap" class="turns-chart-wrap"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <span class="card-title">Tool Token Consumption</span>
+            <span id="tools-meta" class="muted-note"></span>
+          </div>
+          <div id="tools-list" class="tools-list" data-testid="ctx-tools-list"></div>
+        </div>
+      </section>
+
+      <!-- TAB 4: CLI / RAW -->
+      <section id="tab-raw" class="tab-body" role="tabpanel" aria-labelledby="tabbtn-raw">
+        <div class="raw-toolbar">
+          <div class="segmented" role="group" aria-label="Output format">
+            <button type="button" data-raw-mode="cli" class="seg-btn on" aria-pressed="true">agy /context</button>
+            <button type="button" data-raw-mode="json" class="seg-btn" aria-pressed="false">JSON</button>
+          </div>
+          <span class="spacer"></span>
+          <button id="raw-copy" type="button" class="ghost-btn" data-testid="ctx-raw-copy">Copy</button>
+        </div>
+        <pre id="raw-output" class="raw-pre" tabindex="0" data-testid="ctx-raw-output"></pre>
+      </section>
+    </main>
+  </div>
+
+  <!-- Empty state when no conversation exists yet -->
+  <section id="empty" class="empty hidden" data-testid="ctx-empty">
+    <div class="empty-card">
+      <div class="empty-glyph">◉ ⛁ □</div>
+      <h2 class="empty-title">No conversation context yet</h2>
+      <p id="empty-body" class="empty-body">Start or open a conversation in Antigravity Desktop to see its live token grid, category breakdown, checkpoints, and tracked files.</p>
+      <p class="empty-hint"><span class="live-dot" aria-hidden="true"></span>Watching for active conversation…</p>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

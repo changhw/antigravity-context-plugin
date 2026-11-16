@@ -1,0 +1,21 @@
+{
+  "name": "antigravity-context-plugin",
+  "displayName": "Context",
+  "version": "1.0.0",
+  "description": "Interactive /context usage panel and slash command for Antigravity Desktop: proportional token grid, category breakdown, prompt cache telemetry, compaction checkpoints, and tracked files.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "Haowei Zhang",
+    "url": "https://github.com/changhw"
+  },
+  "homepage": "https://github.com/changhw/antigravity-context-plugin",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/changhw/antigravity-context-plugin.git"
+  },
+  "suggestedPrompts": [
+    "/context",
+    "Show my current context window token breakdown and tracked files",
+    "Open the live Context panel in the side pane"
+  ]
+}

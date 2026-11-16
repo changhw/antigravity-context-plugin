@@ -1,0 +1,18 @@
+{
+  "context-session-tracker": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "timeout": 5
+      }
+    ]
+  }
+}

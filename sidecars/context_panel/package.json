@@ -1,0 +1,6 @@
+{
+  "name": "context_panel",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Interactive /context usage sidecar panel for Antigravity Desktop"
+}
