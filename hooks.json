@@ -3,28 +3,28 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "command": "node --no-warnings ./hooks/record_session.mjs || echo {}",
         "timeout": 5
       }
     ],
     "PreInvocation": [
       {
         "type": "command",
-        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "command": "node --no-warnings ./hooks/record_session.mjs || echo {}",
         "timeout": 5
       }
     ],
     "PostInvocation": [
       {
         "type": "command",
-        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs 2>/dev/null || printf '{}\\n'",
+        "command": "node --no-warnings ./hooks/record_session.mjs || echo {}",
         "timeout": 5
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "command -v node >/dev/null 2>&1 && node ./hooks/record_session.mjs --stop 2>/dev/null || printf '{\"decision\":\"allow\"}\\n'",
+        "command": "node --no-warnings ./hooks/record_session.mjs --stop || echo {}",
         "timeout": 5
       }
     ]

@@ -1,7 +1,7 @@
 {
   "name": "antigravity-context-plugin",
   "displayName": "Context",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Interactive /context usage panel and slash command for Antigravity Desktop: live TTFT stopwatch & streaming speed, proportional token grid, category breakdown, prompt cache telemetry, compaction checkpoints, and tracked files.",
   "logo": "assets/logo.svg",
   "author": {

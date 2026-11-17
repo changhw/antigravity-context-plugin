@@ -6,21 +6,38 @@
  * in-flight invocation start timestamps) and snapshots Language Server TTFT
  * generator telemetry into PLUGIN_DATA without injecting anything into prompts.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { collectLiveTelemetry } from '../sidecars/context_panel/ls_telemetry.mjs';
 
 const ID_RE = /^[0-9a-f-]{8,}$/i;
 const isStopArg = process.argv.includes('--stop');
 
+function toLocalPath(p) {
+  if (typeof p !== 'string' || !p.trim()) return '';
+  const trimmed = p.trim();
+  if (trimmed.startsWith('file://')) {
+    const normalized = trimmed.replace(/^file:\/\/\/([a-zA-Z])%3[aA]/, 'file:///$1:');
+    try {
+      return fileURLToPath(normalized);
+    } catch {
+      return normalized.replace(/^file:\/\/\/?/, '');
+    }
+  }
+  return trimmed;
+}
+
 function resolveAppData(payload) {
-  const candidates = [payload?.transcriptPath, payload?.artifactDirectoryPath].filter(
-    (p) => typeof p === 'string' && p.includes('/brain/')
-  );
+  const candidates = [payload?.transcriptPath, payload?.artifactDirectoryPath]
+    .map(toLocalPath)
+    .filter(Boolean);
   for (const p of candidates) {
-    const idx = p.indexOf('/brain/');
-    if (idx > 0) return p.slice(0, idx);
+    const match = /[\\/]brain(?:[\\/]|$)/i.exec(p);
+    if (match && match.index > 0) {
+      return resolve(p.slice(0, match.index));
+    }
   }
   return join(homedir(), '.gemini', 'antigravity');
 }
@@ -34,7 +51,8 @@ function resolveSessionsDir(appData) {
 
 function safeMtime(p) {
   try {
-    return p && existsSync(p) ? statSync(p).mtimeMs : 0;
+    const local = toLocalPath(p);
+    return local && existsSync(local) ? statSync(local).mtimeMs : 0;
   } catch {
     return 0;
   }
@@ -47,6 +65,22 @@ function readExistingRecord(target) {
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};
+  }
+}
+
+function atomicWriteJson(target, record) {
+  const content = JSON.stringify(record, null, 2) + '\n';
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, content, { mode: 0o600 });
+    renameSync(tmp, target);
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // ignore cleanup error
+    }
+    writeFileSync(target, content, { mode: 0o600 });
   }
 }
 
@@ -101,9 +135,7 @@ async function main() {
         updatedAt: nowIso,
       };
 
-      const tmp = `${target}.${process.pid}.tmp`;
-      writeFileSync(tmp, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
-      renameSync(tmp, target);
+      atomicWriteJson(target, record);
 
       // Snapshot generator TTFT metadata into PLUGIN_DATA on completion events
       if (eventName === 'PostInvocation' || eventName === 'Stop') {

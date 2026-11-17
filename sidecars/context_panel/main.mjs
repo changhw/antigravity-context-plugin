@@ -42,15 +42,19 @@ function fetchConversationTitle(conv) {
   const file = exe || 'agentapi';
   const args = [...(exe ? ['agentapi'] : []), 'get-conversation-metadata', conv];
   return new Promise((resolve) => {
-    execFile(file, args, { encoding: 'utf-8', timeout: 4000 }, (err, stdout) => {
-      if (err) return resolve('');
-      try {
-        const md = JSON.parse(stdout || '{}');
-        resolve(md.title || md.summary || md.name || md.metadata?.title || md.conversation?.title || '');
-      } catch {
-        resolve('');
-      }
-    });
+    try {
+      execFile(file, args, { encoding: 'utf-8', timeout: 4000, windowsHide: true }, (err, stdout) => {
+        if (err) return resolve('');
+        try {
+          const md = JSON.parse(stdout || '{}');
+          resolve(md.title || md.summary || md.name || md.metadata?.title || md.conversation?.title || '');
+        } catch {
+          resolve('');
+        }
+      });
+    } catch {
+      resolve('');
+    }
   });
 }
 

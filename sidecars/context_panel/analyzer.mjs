@@ -25,7 +25,54 @@ export const DEFAULT_CONTEXT_LIMIT = 1_048_576;
 const BUILTIN_SYSTEM_TOOLS_ESTIMATE = 3850;
 const MCP_SERVER_BASE_SCHEMA_ESTIMATE = 680;
 const COMPACTION_BLOCK_RE = /(?:^|\n)\s*<CONTEXT_SUMMARY>\s*\r?\n[\s\S]*?<\/CONTEXT_SUMMARY>/i;
-const MODEL_CHANGE_RE = /setting\s+`?Model Selection`?\s+from\s+.+?\s+to\s+([^\n.]+?)(?:\.|\n|$)/gi;
+const MODEL_CHANGE_RE = /setting\s+`?Model Selection`?\s+from\s+.+?\s+to\s+([^\r\n.]+?)(?:\.|\r?\n|$)/gi;
+const IS_WIN = process.platform === 'win32';
+
+// ---------------------------------------------------------------------------
+// Cross-platform path & URI helpers (Windows drive-letter & backslash safe)
+// ---------------------------------------------------------------------------
+
+function normAbsPath(p) {
+  if (!p || typeof p !== 'string') return '';
+  const resolved = resolve(p);
+  return IS_WIN ? resolved.replace(/^[a-z]:/, (d) => d.toUpperCase()) : resolved;
+}
+
+function pathKey(p) {
+  if (!p || typeof p !== 'string') return '';
+  const resolved = resolve(p);
+  return IS_WIN ? resolved.toLowerCase() : resolved;
+}
+
+function isPathInside(childPath, parentDir, allowEqual = false) {
+  if (!childPath || !parentDir) return false;
+  const c = pathKey(childPath);
+  const p = pathKey(parentDir).replace(/[\\/]+$/, '');
+  if (!p) return false;
+  if (allowEqual && c === p) return true;
+  return c.startsWith(p + sep);
+}
+
+function toPosixRel(fromDir, targetPath) {
+  const base = resolve(fromDir).replace(/[\\/]+$/, '');
+  const full = resolve(targetPath);
+  return full.slice(base.length + 1).split(sep).join('/');
+}
+
+function dedupePaths(paths) {
+  const out = [];
+  const seen = new Set();
+  for (const p of paths) {
+    if (!p) continue;
+    const norm = normAbsPath(p);
+    const k = pathKey(norm);
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(norm);
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Safe filesystem & JSONC helpers
@@ -54,15 +101,16 @@ function readCached(path, maxBytes = 64 * 1024 * 1024) {
   if (!st.exists || !st.isFile || st.size < 0 || st.size > maxBytes) {
     return { text: null, ...st };
   }
+  const cacheId = pathKey(path);
   const key = `${st.mtime}:${st.size}`;
-  const hit = textCache.get(path);
+  const hit = textCache.get(cacheId);
   if (hit && hit.key === key) {
     return { text: hit.text, ...st };
   }
   try {
     const text = readFileSync(path, 'utf-8');
     if (textCache.size > 600) textCache.clear();
-    textCache.set(path, { key, text });
+    textCache.set(cacheId, { key, text });
     return { text, ...st };
   } catch {
     return { text: null, ...st };
@@ -121,11 +169,11 @@ export function parseJsonc(raw) {
   }
 }
 
-function toFileUriIfExists(target) {
+export function toFileUriIfExists(target) {
   if (!target || typeof target !== 'string' || !isAbsolute(target)) return '';
-  if (/[%\0\\]/.test(target)) return '';
+  if (target.includes('\0')) return '';
   try {
-    const real = realpathSync(target);
+    const real = realpathSync.native ? realpathSync.native(target) : realpathSync(target);
     if (!statSync(real).isFile()) return '';
     return pathToFileURL(real).href;
   } catch {
@@ -137,13 +185,19 @@ export function uriToPath(uriOrPath) {
   if (!uriOrPath || typeof uriOrPath !== 'string') return '';
   const trimmed = uriOrPath.trim();
   if (trimmed.startsWith('file://')) {
+    const normalizedUri = trimmed.replace(/^file:\/\/\/([a-zA-Z])%3[aA]/, 'file:///$1:');
     try {
-      return fileURLToPath(trimmed);
+      return normAbsPath(fileURLToPath(normalizedUri));
     } catch {
-      return trimmed.replace(/^file:\/\//, '');
+      try {
+        const stripped = decodeURIComponent(normalizedUri.replace(/^file:\/\/\/?/, ''));
+        return isAbsolute(stripped) ? normAbsPath(stripped) : '';
+      } catch {
+        return '';
+      }
     }
   }
-  return isAbsolute(trimmed) ? resolve(trimmed) : '';
+  return isAbsolute(trimmed) ? normAbsPath(trimmed) : '';
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +449,11 @@ function scanEnvironment({ appData, workspacePaths }) {
     } catch {
       // keep original
     }
-    if (seenSystemPaths.has(resolvedPath)) return 0;
+    const sysKey = pathKey(resolvedPath);
+    if (seenSystemPaths.has(sysKey)) return 0;
     const f = readCached(path, 2 * 1024 * 1024);
     if (!f.exists || !f.isFile || f.text === null) return 0;
-    seenSystemPaths.add(resolvedPath);
+    seenSystemPaths.add(sysKey);
     const tokens = estimateTokens(f.text);
     systemFiles.push({
       path,
@@ -543,9 +598,10 @@ function scanEnvironment({ appData, workspacePaths }) {
   for (const kDir of knowledgeDirs) {
     for (const entry of safeReaddir(kDir).sort()) {
       const p = join(kDir, entry);
+      const pk = pathKey(p);
       const f = readCached(p, 2 * 1024 * 1024);
-      if (f.exists && f.isFile && f.text !== null && !seenKnowledge.has(p)) {
-        seenKnowledge.add(p);
+      if (f.exists && f.isFile && f.text !== null && !seenKnowledge.has(pk)) {
+        seenKnowledge.add(pk);
         knowledgeFiles.push({
           path: p,
           name: entry,
@@ -604,7 +660,7 @@ function scanArtifacts(appData, conv) {
         }
         out.push({
           path: full,
-          name: full.slice(convRoot.length + 1),
+          name: toPosixRel(convRoot, full),
           bytes: st.size,
           tokens,
           inContext: false,
@@ -652,13 +708,14 @@ export function analyzeConversation({
   const { appData, transcriptPath, isFull } = located;
   const trStat = transcriptPath ? safeStat(transcriptPath) : { exists: false, mtime: 0, size: 0 };
   const hookMeta = readHookSessionMeta(appData, targetConv);
-  const explicitWs = (Array.isArray(workspacePaths) ? workspacePaths : [])
+  const explicitWs = dedupePaths(
+    (Array.isArray(workspacePaths) ? workspacePaths : []).map(uriToPath).filter(Boolean)
+  );
+  const rawHookWs = (Array.isArray(hookMeta?.workspacePaths) ? hookMeta.workspacePaths : [])
     .map(uriToPath)
     .filter(Boolean);
-  const hookWs = (Array.isArray(hookMeta?.workspacePaths) ? hookMeta.workspacePaths : [])
-    .map(uriToPath)
-    .filter(Boolean);
-  if (hookMeta?.cwd && isAbsolute(hookMeta.cwd)) hookWs.push(resolve(hookMeta.cwd));
+  if (hookMeta?.cwd && isAbsolute(hookMeta.cwd)) rawHookWs.push(normAbsPath(hookMeta.cwd));
+  const hookWs = dedupePaths(rawHookWs);
 
   const cacheKey = [
     appData,
@@ -704,7 +761,7 @@ export function analyzeConversation({
       for (const tc of s.tool_calls) {
         const args = tc?.args && typeof tc.args === 'object' ? tc.args : {};
         const p = unquoteArg(args.Path || args.AbsolutePath || args.TargetFile || '');
-        if (p && isAbsolute(p)) touchedPaths.push(p);
+        if (p && isAbsolute(p)) touchedPaths.push(normAbsPath(p));
       }
     }
   }
@@ -712,15 +769,16 @@ export function analyzeConversation({
   const contextLimit = inferContextLimit(modelName, contextLimitOverride);
 
   // Resolve active workspace paths (explicit > hook > inferred from projects + touched files)
-  const wsSet = new Set([...explicitWs, ...hookWs]);
-  if (wsSet.size === 0 && touchedPaths.length > 0) {
+  let resolvedWorkspaces = dedupePaths([...explicitWs, ...hookWs]);
+  if (resolvedWorkspaces.length === 0 && touchedPaths.length > 0) {
     const registeredProjects = loadRegisteredProjects();
+    const matched = [];
     for (const tp of touchedPaths) {
-      const match = registeredProjects.find((proj) => tp === proj || tp.startsWith(proj + sep));
-      if (match) wsSet.add(match);
+      const match = registeredProjects.find((proj) => isPathInside(tp, proj, true));
+      if (match) matched.push(match);
     }
+    resolvedWorkspaces = dedupePaths(matched);
   }
-  const resolvedWorkspaces = [...wsSet];
 
   // Scan customizations, rules, skills, MCP configs, knowledge, and artifacts
   const env = scanEnvironment({ appData, workspacePaths: resolvedWorkspaces });
@@ -882,15 +940,17 @@ export function analyzeConversation({
     if (tcArgs && typeof tcArgs === 'object') {
       const rawPath = unquoteArg(tcArgs.Path || tcArgs.AbsolutePath || tcArgs.TargetFile || '');
       if (rawPath && isAbsolute(rawPath)) {
-        let key = rawPath;
+        const normPath = normAbsPath(rawPath);
+        let real = normPath;
         try {
-          if (existsSync(rawPath)) key = realpathSync(rawPath);
+          if (existsSync(normPath)) real = realpathSync(normPath);
         } catch {
-          // keep rawPath
+          // keep normPath
         }
+        const key = pathKey(real);
         const entry = inContextFileTokens.get(key) || {
-          path: rawPath,
-          realPath: key,
+          path: normPath,
+          realPath: real,
           tokens: 0,
           reads: 0,
           writes: 0,
@@ -1264,16 +1324,16 @@ export function analyzeConversation({
   // -------------------------------------------------------------------------
   const skillFilesLoaded = [];
   const workspaceFilesLoaded = [];
-  const artifactMap = new Map(artifactList.map((a) => [a.uri || a.path, { ...a }]));
-  const knowledgeMap = new Map(env.knowledgeFiles.map((k) => [k.uri || k.path, { ...k }]));
+  const artifactMap = new Map(artifactList.map((a) => [a.uri || pathKey(a.path), { ...a }]));
+  const knowledgeMap = new Map(env.knowledgeFiles.map((k) => [k.uri || pathKey(k.path), { ...k }]));
 
   const convBrainRoot = join(appData, 'brain', targetConv);
-  const homePrefix = homedir() + sep;
+  const homeDir = homedir();
 
   for (const entry of inContextFileTokens.values()) {
     const p = entry.path;
     const uri = toFileUriIfExists(p);
-    const key = uri || p;
+    const key = uri || pathKey(p);
     const st = safeStat(p);
     let diskTokens = entry.tokens;
     if (st.exists && st.isFile && st.size <= 4 * 1024 * 1024) {
@@ -1281,9 +1341,9 @@ export function analyzeConversation({
       if (f.text !== null) diskTokens = estimateTokens(f.text);
     }
 
-    const isInsideWorkspace = resolvedWorkspaces.some((ws) => p.startsWith(ws + sep));
+    const isInsideWorkspace = resolvedWorkspaces.some((ws) => isPathInside(p, ws));
 
-    if (p.includes('/knowledge/') || knowledgeMap.has(key)) {
+    if (/[\\/]knowledge[\\/]/i.test(p) || knowledgeMap.has(key)) {
       const existing = knowledgeMap.get(key);
       if (existing) {
         existing.inContext = true;
@@ -1299,10 +1359,12 @@ export function analyzeConversation({
           uri,
         });
       }
-    } else if (p.includes('/skills/') && (entry.reads > 0 || !isInsideWorkspace)) {
-      // Extract readable skill relative label e.g. "plugin/SKILL.md"
-      const idx = p.lastIndexOf('/skills/');
-      const relSkill = idx >= 0 ? p.slice(idx + '/skills/'.length) : basename(p);
+    } else if (/[\\/]skills[\\/]/i.test(p) && (entry.reads > 0 || !isInsideWorkspace)) {
+      // Extract readable skill relative label e.g. "plugin/SKILL.md" using forward slashes
+      const pSlash = p.replace(/\\/g, '/');
+      const searchTarget = IS_WIN ? pSlash.toLowerCase() : pSlash;
+      const idx = searchTarget.lastIndexOf('/skills/');
+      const relSkill = idx >= 0 ? pSlash.slice(idx + '/skills/'.length) : basename(p);
       skillFilesLoaded.push({
         path: p,
         name: relSkill,
@@ -1313,8 +1375,8 @@ export function analyzeConversation({
         inContext: true,
         uri,
       });
-    } else if (p.startsWith(convBrainRoot + sep)) {
-      if (!p.includes(`${sep}.system_generated${sep}`) && !p.includes(`${sep}scratch${sep}`)) {
+    } else if (isPathInside(p, convBrainRoot)) {
+      if (!/[\\/]\.system_generated[\\/]/i.test(p) && !/[\\/]scratch[\\/]/i.test(p)) {
         const existing = artifactMap.get(key);
         if (existing) {
           existing.inContext = true;
@@ -1322,7 +1384,7 @@ export function analyzeConversation({
         } else {
           artifactMap.set(key, {
             path: p,
-            name: p.slice(convBrainRoot.length + 1),
+            name: toPosixRel(convBrainRoot, p),
             bytes: st.size > 0 ? st.size : 0,
             tokens: entry.tokens,
             contextTokens: entry.tokens,
@@ -1333,10 +1395,10 @@ export function analyzeConversation({
       }
     } else {
       // Workspace or external source file read/edited during conversation
-      let displayName = p.startsWith(homePrefix) ? `~/${p.slice(homePrefix.length)}` : p;
+      let displayName = isPathInside(p, homeDir) ? `~/${toPosixRel(homeDir, p)}` : p;
       for (const ws of resolvedWorkspaces) {
-        if (p.startsWith(ws + sep)) {
-          displayName = p.slice(ws.length + 1);
+        if (isPathInside(p, ws)) {
+          displayName = toPosixRel(ws, p);
           break;
         }
       }

@@ -22,10 +22,10 @@ conversation's context window is being used.
     and `Active Workspaces` paths):
 
     ```bash
-    node "<skill_dir>/scripts/context_cli.mjs" \
-      --conversation "<conversation-id>" \
-      --workspace "<workspace-path>"
+    node "<skill_dir>/scripts/context_cli.mjs" --conversation "<conversation-id>" --workspace "<workspace-path>"
     ```
+
+    *(On Windows PowerShell `pwsh`, prefix with `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;` so Unicode grid symbols render cleanly.)*
 
     Replace `<skill_dir>` with the directory containing this `SKILL.md` file.
 

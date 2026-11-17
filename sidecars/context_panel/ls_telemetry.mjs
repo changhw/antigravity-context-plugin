@@ -15,9 +15,9 @@
  *   3. `PreInvocation` / `PostInvocation` / `Stop` hook timestamps in
  *      `<plugin_data>/sessions/<convId>.json` for instant prefill start detection.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const ID_RE = /^[0-9a-f-]{8,}$/i;
 
@@ -116,11 +116,21 @@ export function writeCachedTelemetry(appData, convId, data) {
   if (!convId || !ID_RE.test(convId)) return;
   try {
     const target = telemetryFilePath(appData, convId);
-    const dir = join(target, '..');
+    const dir = dirname(target);
     mkdirSync(dir, { recursive: true });
+    const content = JSON.stringify(data, null, 2) + '\n';
     const tmp = `${target}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-    renameSync(tmp, target);
+    try {
+      writeFileSync(tmp, content, { mode: 0o600 });
+      renameSync(tmp, target);
+    } catch {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // ignore cleanup error
+      }
+      writeFileSync(target, content, { mode: 0o600 });
+    }
   } catch {
     // Non-fatal if filesystem is read-only (e.g., inside restricted sandbox)
   }

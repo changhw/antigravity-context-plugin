@@ -1,6 +1,6 @@
 # Antigravity Context Plugin (`/context` for Antigravity Desktop)
 
-Brings the interactive **`/context`** Context Usage panel from the Antigravity CLI (`agy`) directly into the **Google Antigravity Desktop App** (tested on Linux `v2.32.0+`, compatible with macOS & Linux) — both as a **live Auxiliary Side Pane UI extension** and as an on-demand **`/context` chat slash command**.
+Brings the interactive **`/context`** Context Usage panel from the Antigravity CLI (`agy`) directly into the **Google Antigravity Desktop App** (`v2.32.0+`, compatible with **Windows**, **macOS**, & **Linux**) — both as a **live Auxiliary Side Pane UI extension** and as an on-demand **`/context` chat slash command**.
 
 ```text
 Context Usage · Gemini 4 Carbon (High)
@@ -42,6 +42,16 @@ Context Usage · Gemini 4 Carbon (High)
 
 ### Option 1: Direct Clone into Antigravity Global Plugins (Recommended for Desktop App)
 
+**Windows (PowerShell):**
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\.gemini\config\plugins" | Out-Null
+git clone https://github.com/changhw/antigravity-context-plugin.git `
+  "$HOME\.gemini\config\plugins\antigravity-context-plugin"
+```
+
+**macOS / Linux:**
+
 ```bash
 mkdir -p ~/.gemini/config/plugins
 git clone https://github.com/changhw/antigravity-context-plugin.git \
@@ -49,6 +59,17 @@ git clone https://github.com/changhw/antigravity-context-plugin.git \
 ```
 
 ### Option 2: Clone Anywhere & Run Installer
+
+**Windows (PowerShell or Command Prompt):**
+
+```powershell
+git clone https://github.com/changhw/antigravity-context-plugin.git
+cd antigravity-context-plugin
+.\install.ps1
+# (or run install.cmd in Command Prompt; pass -Uninstall / --uninstall to remove)
+```
+
+**macOS / Linux:**
 
 ```bash
 git clone https://github.com/changhw/antigravity-context-plugin.git
@@ -75,7 +96,12 @@ agy plugin install ./antigravity-context-plugin
 2. **Run `/context` in Chat**:
    - Type **`/context`** in the chat input box and press **Enter** to get an immediate CLI-formatted breakdown and a one-click side-pane pill.
 3. **Standalone CLI / Terminal Inspection**:
+   ```powershell
+   # Windows (PowerShell)
+   node "$HOME\.gemini\config\plugins\antigravity-context-plugin\skills\context\scripts\context_cli.mjs"
+   ```
    ```bash
+   # macOS / Linux
    node ~/.gemini/config/plugins/antigravity-context-plugin/skills/context/scripts/context_cli.mjs
    ```
 
@@ -98,7 +124,9 @@ agy plugin install ./antigravity-context-plugin
 antigravity-context-plugin/
 ├── plugin.json                        # Antigravity plugin manifest
 ├── hooks.json                         # Non-blocking SessionStart/PreInvocation metadata hook
-├── install.sh                         # Local installer / uninstaller
+├── install.ps1                        # Windows PowerShell installer / uninstaller
+├── install.cmd                        # Windows Command Prompt wrapper
+├── install.sh                         # macOS / Linux installer / uninstaller
 ├── assets/
 │   └── logo.svg                       # Plugin icon
 ├── hooks/

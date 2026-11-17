@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   analyzeConversation,
@@ -13,6 +13,8 @@ import {
   inferContextLimit,
   listConversations,
   parseJsonc,
+  toFileUriIfExists,
+  uriToPath,
 } from '../sidecars/context_panel/analyzer.mjs';
 import {
   extractLiveStepState,
@@ -156,13 +158,16 @@ test('analyzeConversation reconciles token totals exactly with Gemini API teleme
     // 20x10 = 200 cells
     assert.equal(report.grid.cells.length, 200);
 
-    // Tracked files classification
+    // Tracked files classification & clickable file:// URIs
     assert.equal(report.trackedFiles.artifacts.length, 1);
     assert.equal(report.trackedFiles.artifacts[0].name, 'plan.md');
+    assert.match(report.trackedFiles.artifacts[0].uri, /^file:\/\//);
     assert.equal(report.trackedFiles.skills.length, 1);
     assert.equal(report.trackedFiles.skills[0].name, 'demo-skill/SKILL.md');
+    assert.match(report.trackedFiles.skills[0].uri, /^file:\/\//);
     assert.equal(report.trackedFiles.workspace.length, 1);
     assert.equal(report.trackedFiles.workspace[0].name, 'src/index.js');
+    assert.match(report.trackedFiles.workspace[0].uri, /^file:\/\//);
 
     // CLI text output sanity check
     const cli = formatCliContext(report);
@@ -276,13 +281,135 @@ test('record_session.mjs hook writes session metadata to PLUGIN_DATA and prints 
     });
     assert.equal(out.trim(), '{}');
     const saved = parseJsonc(
-      execFileSync('cat', [join(pluginData, 'sessions', `${conv}.json`)], { encoding: 'utf-8' })
+      readFileSync(join(pluginData, 'sessions', `${conv}.json`), 'utf-8')
     );
     assert.equal(saved.conversationId, conv);
     assert.equal(saved.modelName, 'Gemini 4 Pro');
     assert.deepEqual(saved.workspacePaths, ['/tmp/example-ws']);
   } finally {
     rmSync(pluginData, { recursive: true, force: true });
+  }
+});
+
+test('Windows & cross-platform file URIs, drive-letter casing, and hooks.json shell execution work end-to-end', () => {
+  const env = makeTempEnv();
+  const tempRoot = mkdtempSync(join(tmpdir(), 'agy-win-test-'));
+  try {
+    const srcFile = join(env.workspace, 'src', 'index.js');
+    const fileUri = toFileUriIfExists(srcFile);
+    assert.ok(fileUri.startsWith('file:///'), `Expected file:/// URI, got: ${fileUri}`);
+    assert.equal(uriToPath(fileUri), uriToPath(srcFile));
+
+    if (process.platform === 'win32') {
+      // VS Code / Electron %3A-encoded drive colon & lowercase drive letter matching
+      const encodedUri = fileUri.replace(/^file:\/\/\/([A-Za-z]):/, (_, d) => `file:///${d.toLowerCase()}%3A`);
+      assert.equal(uriToPath(encodedUri), uriToPath(srcFile));
+
+      const lowerWs = env.workspace.replace(/^[A-Z]:/, (d) => d.toLowerCase());
+      const upperSrc = srcFile.replace(/^[a-z]:/, (d) => d.toUpperCase());
+      const conv = '22222222-3333-4444-5555-666666666666';
+      const logsDir = join(env.appData, 'brain', conv, '.system_generated', 'logs');
+      mkdirSync(logsDir, { recursive: true });
+      writeFileSync(
+        join(logsDir, 'transcript_full.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'hi' }),
+          JSON.stringify({
+            step_index: 1,
+            source: 'MODEL',
+            type: 'PLANNER_RESPONSE',
+            status: 'DONE',
+            input_tokens: 5000,
+            output_tokens: 100,
+            tool_calls: [{ name: 'read_file', args: { Path: upperSrc } }],
+          }),
+          JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'code' }),
+        ].join('\n') + '\n'
+      );
+      const report = analyzeConversation({
+        conversationId: conv,
+        appDataDirs: [env.appData],
+        workspacePaths: [lowerWs],
+      });
+      assert.equal(report.trackedFiles.workspace.length, 1);
+      assert.equal(report.trackedFiles.workspace[0].name, 'src/index.js');
+    }
+
+    // Verify record_session.mjs resolves appData from native OS brain path when PLUGIN_DATA is unset
+    const convHook = 'fedcba98-7654-3210-fedc-ba9876543210';
+    const fakeBrainArtifactDir = join(tempRoot, 'custom_appdata', 'brain', convHook);
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.PLUGIN_DATA;
+    const hookOut = execFileSync('node', [join(REPO_ROOT, 'hooks', 'record_session.mjs')], {
+      input: JSON.stringify({
+        conversationId: convHook,
+        artifactDirectoryPath: fakeBrainArtifactDir,
+        hookEventName: 'SessionStart',
+      }),
+      env: cleanEnv,
+      encoding: 'utf-8',
+    });
+    assert.equal(hookOut.trim(), '{}');
+    const derivedSessionFile = join(
+      tempRoot,
+      'custom_appdata',
+      'plugin_data',
+      'antigravity-context-plugin',
+      'sessions',
+      `${convHook}.json`
+    );
+    const derivedSaved = JSON.parse(readFileSync(derivedSessionFile, 'utf-8'));
+    assert.equal(derivedSaved.conversationId, convHook);
+
+    // Also verify forward-slash (/brain/) transcriptPath works identically (Linux/macOS style)
+    const convPosixHook = 'abcdef01-2345-6789-abcd-ef0123456789';
+    const forwardSlashBrain = join(tempRoot, 'posix_appdata', 'brain', convPosixHook, 'transcript.jsonl').replace(/\\/g, '/');
+    execFileSync('node', [join(REPO_ROOT, 'hooks', 'record_session.mjs')], {
+      input: JSON.stringify({
+        conversationId: convPosixHook,
+        transcriptPath: forwardSlashBrain,
+        hookEventName: 'SessionStart',
+      }),
+      env: cleanEnv,
+      encoding: 'utf-8',
+    });
+    const posixSessionFile = join(
+      tempRoot,
+      'posix_appdata',
+      'plugin_data',
+      'antigravity-context-plugin',
+      'sessions',
+      `${convPosixHook}.json`
+    );
+    assert.equal(JSON.parse(readFileSync(posixSessionFile, 'utf-8')).conversationId, convPosixHook);
+
+    // Verify hooks.json commands execute cleanly in the host shell (cmd /c on Windows, sh -c on Unix)
+    const hooksCfg = JSON.parse(readFileSync(join(REPO_ROOT, 'hooks.json'), 'utf-8'));
+    const tracker = hooksCfg['context-session-tracker'];
+    const shellExe = process.platform === 'win32' ? 'cmd.exe' : 'sh';
+    const shellFlag = process.platform === 'win32' ? '/c' : '-c';
+    const hookDataDir = join(tempRoot, 'hook_plugin_data');
+
+    const preCmd = tracker.PreInvocation[0].command;
+    const preStdout = execFileSync(shellExe, [shellFlag, preCmd], {
+      cwd: REPO_ROOT,
+      input: JSON.stringify({ conversationId: convHook, hookEventName: 'PreInvocation' }),
+      env: { ...process.env, PLUGIN_DATA: hookDataDir },
+      encoding: 'utf-8',
+    });
+    assert.deepEqual(JSON.parse(preStdout.trim()), {});
+
+    const stopCmd = tracker.Stop[0].command;
+    const stopStdout = execFileSync(shellExe, [shellFlag, stopCmd], {
+      cwd: REPO_ROOT,
+      input: JSON.stringify({ conversationId: convHook, hookEventName: 'Stop' }),
+      env: { ...process.env, PLUGIN_DATA: hookDataDir },
+      encoding: 'utf-8',
+    });
+    assert.deepEqual(JSON.parse(stopStdout.trim()), { decision: 'allow' });
+  } finally {
+    env.cleanup();
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 });
 
